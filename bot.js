@@ -212,6 +212,12 @@ function isDoneFlow(text) {
   return /terima\s*kasih/.test(t) && /berhasil/.test(t) && /3x24\s*jam/.test(t)
 }
 
+/* 👉 NEW: deteksi pesan konfirmasi "kode unik valid" agar TIDAK kirim kode lagi */
+function isCodeValidNotice(text = '') {
+  const t = norm(text)
+  return /kode\s*unik/.test(t) && /valid/.test(t)
+}
+
 /* ====== 6 PESAN HYDRO (yang mem-Pause "Hi") ====== */
 const HYDRO_FLOW_PATTERNS = [
   /promo[\s\S]*hydroplus[\s\S]*nonstop[\s\S]*miliaran[\s\S]*unggah[\s\S]*kode[\s\S]*unik|syarat\s+dan\s+ketentuan/i,
@@ -391,8 +397,12 @@ async function startBot() {
         return
       }
 
-      // 4) minta kode unik → INIT_CODE
+      // 4) minta kode unik → INIT_CODE (dengan guard "kode unik valid")
       if (isAskCode(text) || matchAny(text, TRIGGERS.askCode)) {
+        if (isCodeValidNotice(text)) {
+          log('ℹ️ [SOURCE] Konfirmasi "kode unik valid" terdeteksi → tidak kirim kode lagi.')
+          return
+        }
         try {
           await sock.sendMessage(SOURCE_JID, { text: INIT_CODE || '(kode belum di-set)' })
           log('📤 [SOURCE] Diminta kode unik → mengirim kode.')
@@ -466,9 +476,7 @@ async function startBot() {
 
       // 1) selesai
       if (text && (isDoneFlow(text) || matchAny(text, TRIGGERS.doneMsg))) {
-        try {
-          await sock.sendMessage(TARGET_JID, { react: { text: '✅', key: msg.key } })
-        } catch {}
+        try { await sock.sendMessage(TARGET_JID, { react: { text: '✅', key: msg.key } }) } catch {}
         log('🎉 Bot telah Sukses')
         return
       }
@@ -497,8 +505,12 @@ async function startBot() {
         return
       }
 
-      // 4) kode unik → INIT_CODE
+      // 4) kode unik → INIT_CODE (dengan guard "kode unik valid")
       if (text && (isAskCode(text) || matchAny(text, TRIGGERS.askCode))) {
+        if (isCodeValidNotice(text)) {
+          log('ℹ️ [TARGET] Konfirmasi "kode unik valid" terdeteksi → tidak kirim kode lagi.')
+          return
+        }
         try {
           await sock.sendMessage(TARGET_JID, { text: INIT_CODE || '(kode belum di-set)' })
           log('📤 [TARGET] Diminta kode unik → mengirim kode.')
