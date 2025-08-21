@@ -22,15 +22,15 @@ const WA_TARGET = process.env.WA_TARGET
 
 const INIT_CODE  = process.env.INIT_CODE  || ''
 const INIT_CODE2 = process.env.INIT_CODE2 || ''   // Kode tahap-2
-const IMG1_PATH  = process.env.IMG1_PATH || ''
-const IMG2_PATH  = process.env.IMG2_PATH || ''
+const IMG1_PATH = process.env.IMG1_PATH || ''
+const IMG2_PATH = process.env.IMG2_PATH || ''
 
-// Telegram (aktif)
+// Telegram (aktif untuk notifikasi trigger dari SOURCE)
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID
 
 // Hi loop
-const HI_INTERVAL_MS = Number(process.env.HI_INTERVAL_MS || 60 * 1000) // default 1 menit
+const HI_INTERVAL_MS = Number(process.env.HI_INTERVAL_MS || 60 * 1000) // ritme "Hi"
 
 /* ================== STORAGE ================== */
 const DATA_DIR = path.resolve('./data')
@@ -61,12 +61,10 @@ mustHave('IMG2_PATH', IMG2_PATH)
 mustHave('TELEGRAM_BOT_TOKEN', TELEGRAM_BOT_TOKEN)
 mustHave('TELEGRAM_CHAT_ID', TELEGRAM_CHAT_ID)
 
-if (!fs.existsSync(IMG1_PATH)) console.warn('⚠️ IMG1_PATH tidak ditemukan:', IMG1_PATH)
-if (!fs.existsSync(IMG2_PATH)) console.warn('⚠️ IMG2_PATH tidak ditemukan:', IMG2_PATH)
-
 /* ================== UTIL ================== */
 function log(...args) { console.log(`[${new Date().toISOString()}]`, ...args) }
 function saveLastTrigger(text) { try { fs.writeFileSync(TRIGGER_STORE, text, 'utf-8') } catch {} }
+
 function extractTextFromMessage(msg) {
   if (!msg?.message) return ''
   const m = msg.message
@@ -82,60 +80,27 @@ function norm(s = '') {
   return String(s).toLowerCase().replace(/\r/g, '').replace(/[ \t]+/g, ' ').replace(/\n+/g, '\n').trim()
 }
 
-/* ================== TELEGRAM ================== */
-async function tgSendMessage(text) {
-  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`
-  await axios.post(url, { chat_id: Number(TELEGRAM_CHAT_ID), text, parse_mode: 'Markdown' })
-}
-
-/* ================== TTS (opsional) ================== */
-let HAS_FFMPEG = false
-exec('ffmpeg -version', (err) => { HAS_FFMPEG = !err; log('FFmpeg available:', HAS_FFMPEG) })
-async function downloadToFile(url, filePath) {
-  const writer = fs.createWriteStream(filePath)
-  const res = await axios({ url, method: 'GET', responseType: 'stream' })
-  await new Promise((resolve, reject) => {
-    res.data.pipe(writer)
-    writer.on('finish', resolve)
-    writer.on('error', reject)
-  })
-}
-async function createVoiceNoteOgg(text, outPath) {
-  const url = await googleTTS.getAudioUrl(text, { lang: 'id', slow: false, host: 'https://translate.google.com' })
-  const tmpMp3 = outPath + '.mp3'
-  await downloadToFile(url, tmpMp3)
-  await new Promise((resolve, reject) => {
-    execFile('ffmpeg', ['-y', '-i', tmpMp3, '-c:a', 'libopus', '-b:a', '32k', outPath], (err) => {
-      try { fs.unlinkSync(tmpMp3) } catch {}
-      if (err) return reject(err)
-      resolve()
-    })
-  })
-}
-
-/* ================== IMAGE SEND ================== */
-async function sendImage(sock, jid, filePath, caption = '') {
-  const exists = fs.existsSync(filePath)
-  log(`sendImage(): path="${filePath}", exists=${exists}`)
-  if (!exists) throw new Error(`File tidak ditemukan: ${filePath}`)
-  const mimetype = mime.lookup(filePath) || 'image/jpeg'
-  const buffer = fs.readFileSync(filePath)
-  await sock.sendMessage(jid, { image: buffer, mimetype, caption })
-}
-
 /* ================== DETECTION PATTERNS ================== */
-// Pesan standar HYDRO — harus diabaikan total
-const STD_HYDRO_1 = /selamat datang di akun whatsapp resmi hydroplus/i
-const STD_HYDRO_2 = /yuk coba lagi dengan kode unik yang lain di dalam tutup botol hydroplus untuk dapatkan hadiahnya/i
-const STD_HYDRO_3 = /terima kasih telah berpartisipasi dalam program hydroplus nonstop miliaran[\s\S]*ketik\s*["“]?hi["”]?\s*untuk\s*memulai\s*chatting\s*kembali/i
-function isStandardHydro(text = '') {
-  const t = norm(text)
-  return STD_HYDRO_1.test(t) || STD_HYDRO_2.test(t) || STD_HYDRO_3.test(t)
+// 3 pesan standar → selalu diabaikan
+const std1 = /selamat datang di akun whatsapp resmi hydroplus/i
+const std2 = /yuk coba lagi dengan kode unik yang lain di dalam tutup botol hydroplus untuk dapatkan hadiahnya/i
+const std3 = /terima kasih telah berpartisipasi dalam program hydroplus nonstop miliaran🤗[\s\S]*ketik\s*["“]?hi["”]?\s*untuk\s*memulai chatting kembali/i
+function isStandardMessage(text='') {
+  const t = text
+  return std1.test(t) || std2.test(t) || std3.test(t)
 }
 
-// Flow detektor
+// Promo intro Hydro — JANGAN balas kode walau mengandung "kode unik"
+function isPromoIntro(text = '') {
+  const t = norm(text)
+  // ajakan ikut promo + mention (meng)unggah kode unik
+  return /promo[\s\S]*hydroplus[\s\S]*nonstop[\s\S]*miliaran/i.test(t)
+      && /(unggah|mengunggah)\s*kode\s*unik/i.test(t)
+}
+
 function isAskCode(text) {
   const t = norm(text)
+  if (isPromoIntro(t)) return false // guard agar promo intro tidak dianggap minta kode
   return /kode\s*unik/.test(t) && !/foto|ktp/.test(t)
 }
 function isAskImgCode(text) {
@@ -154,29 +119,54 @@ function isCodeValidNotice(text) {
   const t = norm(text)
   return /kode\s*unik/.test(t) && /valid/.test(t)
 }
-// Penutup (aktifkan hi loop)
+
+/* Penutup Hydro (aktifkan kembali hi-loop jika ingin) */
 function isClosingHydro(text) {
   const t = norm(text)
   return /ketik\s*["“]?hi["”]?\s*untuk\s*memulai/.test(t)
 }
-// Flow umum (untuk pause hi loop saat aktif)
+
+/* Flow umum Hydro (untuk pause hi-loop) */
 function isHydroFlow(text) {
   const t = norm(text)
   return /(kode\s*unik|bukti\s*foto|foto\s*ktp|verifikasi\s*data)/.test(t)
 }
 
-// TRIGGER yang harus di-notif ke Telegram (hanya dari SOURCE)
-const TRIGGER_1 = /promo\s*\*?hydroplus\s*nonstop\s*miliaran/i
-const TRIGGER_2 = /silakan\s*tuliskan\s*kode\s*unik[\s\S]*pastikan\s*kode\s*unik\s*berjumlah\s*9\s*karakter/i
-function isTriggerFromSource(text) {
-  const t = norm(text)
-  return TRIGGER_1.test(t) || TRIGGER_2.test(t)
+/* Trigger ke Telegram: HANYA jika pesan dari SOURCE adalah promo intro atau minta kode */
+function isSourceTrigger(text) {
+  return isPromoIntro(text) || isAskCode(text)
+}
+
+/* ================== TELEGRAM HELPERS ================== */
+async function tgSendMessage(text) {
+  try {
+    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`
+    await axios.post(url, { chat_id: Number(TELEGRAM_CHAT_ID), text, parse_mode: 'Markdown' })
+  } catch (e) {
+    log('⚠️ Gagal kirim Telegram:', e?.message || e)
+  }
+}
+
+/* ================== IMAGE SEND ================== */
+async function sendImage(sock, jid, filePath, caption = '') {
+  const exists = fs.existsSync(filePath)
+  log(`sendImage(): path="${filePath}", exists=${exists}`)
+  if (!exists) throw new Error(`File tidak ditemukan: ${filePath}`)
+  const mimetype = mime.lookup(filePath) || 'image/jpeg'
+  const buffer = fs.readFileSync(filePath)
+  await sock.sendMessage(jid, { image: buffer, mimetype, caption })
 }
 
 /* ================== STAGE STATE (dua tahap kode) ================== */
+// Default semua JID mulai di tahap-1. Setelah "Sukses" di tahap-1 → pindah ke tahap-2.
 const stageByJid = new Map() // jid -> 1 | 2
-function getStage(jid) { return stageByJid.get(jid) || 1 }
-function setStage(jid, s) { stageByJid.set(jid, s); log(`🔀 Stage untuk ${jid} => tahap-${s}`) }
+function getStage(jid) {
+  return stageByJid.get(jid) || 1
+}
+function setStage(jid, s) {
+  stageByJid.set(jid, s)
+  log(`🔀 Stage untuk ${jid} => tahap-${s}`)
+}
 function getActiveCodeFor(jid) {
   const stage = getStage(jid)
   return stage === 2 ? (INIT_CODE2 || INIT_CODE) : INIT_CODE
@@ -201,13 +191,18 @@ async function hiLoop(sock) {
   }
 }
 
-/* ================== MAIN + AUTORECONNECT ================== */
-async function startBot(backoffMs = 0) {
-  if (backoffMs > 0) {
-    log(`⏳ Menunggu ${Math.round(backoffMs/1000)}s sebelum reconnect…`)
-    await delay(backoffMs)
-  }
+/* ================== RECONNECT BACKOFF ================== */
+let reconnectAttempts = 0
+async function scheduleReconnect(fn) {
+  reconnectAttempts++
+  const wait = Math.min(30000, 1000 * Math.pow(2, reconnectAttempts)) // 1s,2s,4s,... max 30s
+  log(`⏳ Jadwalkan reconnect dalam ${Math.round(wait/1000)}s (attempt ${reconnectAttempts})`)
+  await delay(wait)
+  fn().catch(e => log('Gagal restart:', e))
+}
 
+/* ================== MAIN ================== */
+async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState(path.join(DATA_DIR, 'auth_info'))
   const sock = makeWASocket({
     auth: state,
@@ -216,7 +211,6 @@ async function startBot(backoffMs = 0) {
   })
 
   sock.ev.on('creds.update', saveCreds)
-
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update
     if (qr) {
@@ -225,19 +219,17 @@ async function startBot(backoffMs = 0) {
       qrcode.generate(qr, { small: true })
     }
     if (connection === 'open') {
+      reconnectAttempts = 0
       log('✅ Bot tersambung sebagai:', sock.user?.id)
       hiLoop(sock).catch(e => log('hiLoop error:', e))
     } else if (connection === 'close') {
-      const isBoom = lastDisconnect?.error instanceof Boom
-      const statusCode = isBoom ? lastDisconnect.error.output.statusCode : undefined
-      const loggedOut = statusCode === DisconnectReason.loggedOut
-      log('❌ Koneksi tertutup. code=', statusCode, 'loggedOut=', loggedOut)
-
-      if (!loggedOut) {
-        const nextBackoff = Math.min(backoffMs ? backoffMs * 2 : 3000, 60_000)
-        try { sock?.end?.() } catch {}
-        // Recurse with backoff
-        startBot(nextBackoff).catch(e => log('Gagal restart:', e))
+      const statusCode = (lastDisconnect?.error instanceof Boom)
+        ? lastDisconnect.error.output.statusCode
+        : undefined
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut
+      log('❌ Koneksi tertutup. code=', statusCode, 'shouldReconnect=', shouldReconnect)
+      if (shouldReconnect) {
+        await scheduleReconnect(startBot)
       } else {
         log('⚠️ Logout permanen. Hapus folder data/auth_info untuk login ulang.')
       }
@@ -253,7 +245,18 @@ async function startBot(backoffMs = 0) {
     const text = extractTextFromMessage(msg).trim()
     if (!text) return
 
-    /* ===== OWNER reset perintah (opsional) ===== */
+    /* ===== Abaikan 3 PESAN STANDAR (SOURCE / TARGET) ===== */
+    if (isStandardMessage(text)) {
+      log('ℹ️ Pesan standar terdeteksi → diabaikan.')
+      // Pesan penutup standar (std3) biasanya mengandung “Ketik Hi…”
+      if (isClosingHydro(text)) {
+        if (!hiLoopEnabled) log('▶️ Closing Hydro → Hi loop dilanjutkan.')
+        hiLoopEnabled = true
+      }
+      return
+    }
+
+    /* ===== OWNER: perintah reset tahap (opsional) ===== */
     if (from === OWNER_JID) {
       const t = norm(text)
       if (t === 'reset tahap source') { setStage(SOURCE_JID, 1); return }
@@ -262,38 +265,31 @@ async function startBot(backoffMs = 0) {
 
     /* ===== SOURCE_JID ===== */
     if (from === SOURCE_JID) {
-      // Abaikan total jika pesan standar HYDRO
-      if (isStandardHydro(text)) {
-        log('… [SOURCE] Pesan standar HYDRO — diabaikan (no reply).')
-        if (isClosingHydro(text)) {
-          if (!hiLoopEnabled) log('▶️ Closing Hydro (SOURCE) → Hi loop dilanjutkan.')
-          hiLoopEnabled = true
-        }
-        return
-      }
-
-      // Kontrol hi-loop untuk flow
+      // Kontrol hi-loop
       if (isHydroFlow(text)) {
         if (hiLoopEnabled) log('⏸️ Hi loop dihentikan (SOURCE Hydro flow).')
         hiLoopEnabled = false
       }
       if (isClosingHydro(text)) {
-        if (!hiLoopEnabled) log('▶️ Pesan closing Hydro (SOURCE) → Hi loop dilanjutkan.')
+        if (!hiLoopEnabled) log('▶️ Closing Hydro (SOURCE) → Hi loop lanjut.')
         hiLoopEnabled = true
       }
 
-      // Kirim NOTIF TELEGRAM hanya jika TRIGGER (dua pesan yang kamu sebut)
-      if (isTriggerFromSource(text)) {
-        saveLastTrigger(text)
+      // Notifikasi Telegram HANYA untuk trigger (promo intro atau minta kode)
+      if (isSourceTrigger(text)) {
         try {
           await tgSendMessage(`📣 *TRIGGER dari SOURCE*\n\n${text}`)
           log('➡️ Trigger dikirim ke Telegram.')
-        } catch (e) {
-          log('⚠️ Gagal kirim trigger ke Telegram:', e?.message || e)
-        }
+        } catch {}
       }
 
-      // 1) selesai → naik tahap jika masih tahap-1
+      // Promo intro → JANGAN balas apapun
+      if (isPromoIntro(text)) {
+        log('ℹ️ [SOURCE] Promo intro terdeteksi → tidak balas.')
+        return
+      }
+
+      // Selesai → naik tahap jika masih tahap-1
       if (isDoneFlow(text)) {
         const st = getStage(SOURCE_JID)
         if (st === 1) {
@@ -305,7 +301,7 @@ async function startBot(backoffMs = 0) {
         return
       }
 
-      // 2) foto kode unik → IMG1
+      // Foto kode unik → IMG1
       if (isAskImgCode(text)) {
         try {
           await sendImage(sock, SOURCE_JID, IMG1_PATH)
@@ -316,7 +312,7 @@ async function startBot(backoffMs = 0) {
         return
       }
 
-      // 3) foto KTP → IMG2
+      // Foto KTP → IMG2
       if (isAskKTP(text)) {
         try {
           await sendImage(sock, SOURCE_JID, IMG2_PATH)
@@ -327,7 +323,7 @@ async function startBot(backoffMs = 0) {
         return
       }
 
-      // 4) minta kode unik → kirim sesuai tahap; skip bila notice 'valid'
+      // Minta kode unik → kirim sesuai tahap; skip bila ada notice 'valid'
       if (isAskCode(text)) {
         if (isCodeValidNotice(text)) {
           log('ℹ️ [SOURCE] "kode unik valid" → skip kirim kode.')
@@ -343,33 +339,30 @@ async function startBot(backoffMs = 0) {
         return
       }
 
-      // Catat selain itu (opsional)
+      // Lainnya: catat sebagai last trigger (opsional)
+      saveLastTrigger(text)
       return
     }
 
     /* ===== TARGET_JID ===== */
     if (from === TARGET_JID) {
-      // Abaikan total jika pesan standar HYDRO
-      if (isStandardHydro(text)) {
-        log('… [TARGET] Pesan standar HYDRO — diabaikan (no reply).')
-        if (isClosingHydro(text)) {
-          if (!hiLoopEnabled) log('▶️ Closing Hydro (TARGET) → Hi loop dilanjutkan.')
-          hiLoopEnabled = true
-        }
-        return
-      }
-
-      // Kontrol hi-loop untuk flow
+      // Kontrol hi-loop
       if (isHydroFlow(text)) {
         if (hiLoopEnabled) log('⏸️ Hi loop dihentikan (TARGET Hydro flow).')
         hiLoopEnabled = false
       }
       if (isClosingHydro(text)) {
-        if (!hiLoopEnabled) log('▶️ Pesan closing Hydro (TARGET) → Hi loop dilanjutkan.')
+        if (!hiLoopEnabled) log('▶️ Closing Hydro (TARGET) → Hi loop lanjut.')
         hiLoopEnabled = true
       }
 
-      // 1) selesai → naik tahap jika masih tahap-1
+      // Promo intro di TARGET → jangan balas
+      if (isPromoIntro(text)) {
+        log('ℹ️ [TARGET] Promo intro terdeteksi → tidak balas.')
+        return
+      }
+
+      // Selesai → naik tahap bila masih tahap-1
       if (isDoneFlow(text)) {
         try { await sock.sendMessage(TARGET_JID, { react: { text: '✅', key: msg.key } }) } catch {}
         const st = getStage(TARGET_JID)
@@ -382,7 +375,7 @@ async function startBot(backoffMs = 0) {
         return
       }
 
-      // 2) foto kode unik → IMG1
+      // Foto kode unik → IMG1
       if (isAskImgCode(text)) {
         try {
           await sendImage(sock, TARGET_JID, IMG1_PATH)
@@ -393,7 +386,7 @@ async function startBot(backoffMs = 0) {
         return
       }
 
-      // 3) foto KTP → IMG2
+      // Foto KTP → IMG2
       if (isAskKTP(text)) {
         try {
           await sendImage(sock, TARGET_JID, IMG2_PATH)
@@ -404,7 +397,7 @@ async function startBot(backoffMs = 0) {
         return
       }
 
-      // 4) minta kode unik → kirim sesuai tahap; skip bila notice 'valid'
+      // Minta kode unik → kirim sesuai tahap; skip bila ada notice 'valid'
       if (isAskCode(text)) {
         if (isCodeValidNotice(text)) {
           log('ℹ️ [TARGET] "kode unik valid" → skip kirim kode.')
@@ -422,8 +415,6 @@ async function startBot(backoffMs = 0) {
       return
     }
   })
-
-  return sock
 }
 
 /* ================== GRACEFUL SHUTDOWN ================== */
