@@ -20,14 +20,10 @@ const WA_OWNER  = process.env.WHATSAPP_OWNER
 const WA_SOURCE = process.env.WA_SOURCE
 const WA_TARGET = process.env.WA_TARGET
 
-const INIT_CODE  = process.env.INIT_CODE  || ''
-const INIT_CODE2 = process.env.INIT_CODE2 || ''   // Kode tahap-2
+let INIT_CODE  = process.env.INIT_CODE  || ''   // bisa diubah via owner command
+let INIT_CODE2 = process.env.INIT_CODE2 || ''   // bisa diubah via owner command
 const IMG1_PATH = process.env.IMG1_PATH || ''
 const IMG2_PATH = process.env.IMG2_PATH || ''
-
-// Telegram (aktif untuk notifikasi trigger dari SOURCE)
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN
-const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID
 
 // Hi loop
 const HI_INTERVAL_MS = Number(process.env.HI_INTERVAL_MS || 60 * 1000) // ritme "Hi"
@@ -58,8 +54,6 @@ mustHave('INIT_CODE', INIT_CODE)
 mustHave('INIT_CODE2', INIT_CODE2)
 mustHave('IMG1_PATH', IMG1_PATH)
 mustHave('IMG2_PATH', IMG2_PATH)
-mustHave('TELEGRAM_BOT_TOKEN', TELEGRAM_BOT_TOKEN)
-mustHave('TELEGRAM_CHAT_ID', TELEGRAM_CHAT_ID)
 
 /* ================== UTIL ================== */
 function log(...args) { console.log(`[${new Date().toISOString()}]`, ...args) }
@@ -80,71 +74,59 @@ function norm(s = '') {
   return String(s).toLowerCase().replace(/\r/g, '').replace(/[ \t]+/g, ' ').replace(/\n+/g, '\n').trim()
 }
 
-/* ================== DETECTION PATTERNS ================== */
-// 3 pesan standar → selalu diabaikan
+/* ================== DETECTION: 3 PESAN STANDAR ================== */
+// 1
 const std1 = /selamat datang di akun whatsapp resmi hydroplus/i
+// 2
 const std2 = /yuk coba lagi dengan kode unik yang lain di dalam tutup botol hydroplus untuk dapatkan hadiahnya/i
+// 3 (penutup – mengandung Ketik "Hi" untuk memulai chatting kembali)
 const std3 = /terima kasih telah berpartisipasi dalam program hydroplus nonstop miliaran🤗[\s\S]*ketik\s*["“]?hi["”]?\s*untuk\s*memulai chatting kembali/i
-function isStandardMessage(text='') {
+
+function isStandardMessage(text = '') {
   const t = text
   return std1.test(t) || std2.test(t) || std3.test(t)
 }
+function isClosingHydro(text = '') {
+  return std3.test(text)
+}
 
-// Promo intro Hydro — JANGAN balas kode walau mengandung "kode unik"
+/* ================== DETECTION: FLOW / GUARD ================== */
+// Promo intro – JANGAN balas kode walau ada kata “kode unik”
 function isPromoIntro(text = '') {
   const t = norm(text)
-  // ajakan ikut promo + mention (meng)unggah kode unik
   return /promo[\s\S]*hydroplus[\s\S]*nonstop[\s\S]*miliaran/i.test(t)
       && /(unggah|mengunggah)\s*kode\s*unik/i.test(t)
 }
-
-function isAskCode(text) {
+function isAskCode(text = '') {
   const t = norm(text)
-  if (isPromoIntro(t)) return false // guard agar promo intro tidak dianggap minta kode
+  if (isPromoIntro(t)) return false
   return /kode\s*unik/.test(t) && !/foto|ktp/.test(t)
 }
-function isAskImgCode(text) {
+function isAskImgCode(text = '') {
   const t = norm(text)
   return /(foto|bukti)/.test(t) && /kode\s*unik/.test(t)
 }
-function isAskKTP(text) {
+function isAskKTP(text = '') {
   const t = norm(text)
   return /foto/.test(t) && /(ktp|kartu tanda penduduk)/.test(t)
 }
-function isDoneFlow(text) {
+function isDoneFlow(text = '') {
   const t = norm(text)
   return /terima\s*kasih/.test(t) && /3x24\s*jam/.test(t)
 }
-function isCodeValidNotice(text) {
+function isCodeValidNotice(text = '') {
   const t = norm(text)
   return /kode\s*unik/.test(t) && /valid/.test(t)
 }
-
-/* Penutup Hydro (aktifkan kembali hi-loop jika ingin) */
-function isClosingHydro(text) {
-  const t = norm(text)
-  return /ketik\s*["“]?hi["”]?\s*untuk\s*memulai/.test(t)
-}
-
-/* Flow umum Hydro (untuk pause hi-loop) */
-function isHydroFlow(text) {
+function isHydroFlow(text = '') {
   const t = norm(text)
   return /(kode\s*unik|bukti\s*foto|foto\s*ktp|verifikasi\s*data)/.test(t)
 }
 
-/* Trigger ke Telegram: HANYA jika pesan dari SOURCE adalah promo intro atau minta kode */
-function isSourceTrigger(text) {
-  return isPromoIntro(text) || isAskCode(text)
-}
-
-/* ================== TELEGRAM HELPERS ================== */
-async function tgSendMessage(text) {
-  try {
-    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`
-    await axios.post(url, { chat_id: Number(TELEGRAM_CHAT_ID), text, parse_mode: 'Markdown' })
-  } catch (e) {
-    log('⚠️ Gagal kirim Telegram:', e?.message || e)
-  }
+/* ================== TRIGGER RULE ================== */
+// SEMUA pesan dianggap TRIGGER KECUALI 3 pesan standar (std1/std2/std3).
+function isTrigger(text = '') {
+  return !isStandardMessage(text)
 }
 
 /* ================== IMAGE SEND ================== */
@@ -158,7 +140,6 @@ async function sendImage(sock, jid, filePath, caption = '') {
 }
 
 /* ================== STAGE STATE (dua tahap kode) ================== */
-// Default semua JID mulai di tahap-1. Setelah "Sukses" di tahap-1 → pindah ke tahap-2.
 const stageByJid = new Map() // jid -> 1 | 2
 function getStage(jid) {
   return stageByJid.get(jid) || 1
@@ -173,7 +154,8 @@ function getActiveCodeFor(jid) {
 }
 
 /* ================== HI LOOP ================== */
-let hiLoopEnabled = true
+// Sesuai kebutuhan: Hi loop HANYA ON kalau std3 masuk. Selain itu OFF.
+let hiLoopEnabled = false // start OFF
 let lastHiAt = 0
 async function hiLoop(sock) {
   log('▶️ Hi loop dimulai')
@@ -189,6 +171,66 @@ async function hiLoop(sock) {
     }
     await delay(5000)
   }
+}
+
+/* ================== OWNER CONTROL ================== */
+// Owner dapat pause/resume bot & set code
+let PAUSED = false
+function pausedGuard(from) {
+  // jika bot dipause, hanya pesan OWNER yang dilayani
+  return PAUSED && from !== OWNER_JID
+}
+async function handleOwnerCommands(sock, text) {
+  const t = norm(text)
+
+  if (t === 'pause bot' || t === 'jeda bot') {
+    PAUSED = true
+    await sock.sendMessage(OWNER_JID, { text: '⏸️ Bot dijeda.' })
+    log('⏸️ Bot dijeda oleh owner.')
+    return true
+  }
+  if (t === 'resume bot' || t === 'lanjut bot') {
+    PAUSED = false
+    await sock.sendMessage(OWNER_JID, { text: '▶️ Bot dilanjutkan.' })
+    log('▶️ Bot dilanjutkan oleh owner.')
+    return true
+  }
+  if (t.startsWith('set code1 ')) {
+    const code = text.slice(9).trim() // setelah 'set code1 '
+    if (code) {
+      INIT_CODE = code
+      await sock.sendMessage(OWNER_JID, { text: `✅ INIT_CODE diperbarui: ${INIT_CODE}` })
+      log('INIT_CODE di-set owner:', INIT_CODE)
+    } else {
+      await sock.sendMessage(OWNER_JID, { text: '❌ Format: set code1 F123ABCDE' })
+    }
+    return true
+  }
+  if (t.startsWith('set code2 ')) {
+    const code = text.slice(9).trim() // setelah 'set code2 '
+    if (code) {
+      INIT_CODE2 = code
+      await sock.sendMessage(OWNER_JID, { text: `✅ INIT_CODE2 diperbarui: ${INIT_CODE2}` })
+      log('INIT_CODE2 di-set owner:', INIT_CODE2)
+    } else {
+      await sock.sendMessage(OWNER_JID, { text: '❌ Format: set code2 F123ABCDE' })
+    }
+    return true
+  }
+  if (t === 'status bot') {
+    const lines = [
+      `🧠 Status Bot:`,
+      `• Paused: ${PAUSED}`,
+      `• Hi Loop: ${hiLoopEnabled ? 'ON' : 'OFF'} (aktif kalau std3 masuk)`,
+      `• Stage SOURCE: ${getStage(SOURCE_JID)}`,
+      `• Stage TARGET: ${getStage(TARGET_JID)}`,
+      `• INIT_CODE: ${INIT_CODE}`,
+      `• INIT_CODE2: ${INIT_CODE2}`
+    ]
+    await sock.sendMessage(OWNER_JID, { text: lines.join('\n') })
+    return true
+  }
+  return false
 }
 
 /* ================== RECONNECT BACKOFF ================== */
@@ -245,175 +287,101 @@ async function startBot() {
     const text = extractTextFromMessage(msg).trim()
     if (!text) return
 
-    /* ===== Abaikan 3 PESAN STANDAR (SOURCE / TARGET) ===== */
+    // =============== OWNER COMMANDS ===============
+    if (from === OWNER_JID) {
+      const handled = await handleOwnerCommands(sock, text)
+      if (handled) return
+      // lanjutkan ke bawah kalau owner kirim pesan biasa (tidak ada perintah) → tetap kena aturan trigger
+    }
+
+    // Jika bot dijeda & pengirim bukan owner → abaikan total
+    if (pausedGuard(from)) return
+
+    // === Aturan Hi-loop: hanya ON jika std3; selain itu OFF ===
+    if (isClosingHydro(text)) {
+      if (!hiLoopEnabled) log('▶️ std3 diterima → Hi loop ON')
+      hiLoopEnabled = true
+    } else {
+      if (hiLoopEnabled) log('⏸️ Bukan std3 → Hi loop OFF')
+      hiLoopEnabled = false
+    }
+
+    // === Abaikan 3 pesan standar (bukan trigger, tidak balas apa pun) ===
     if (isStandardMessage(text)) {
       log('ℹ️ Pesan standar terdeteksi → diabaikan.')
-      // Pesan penutup standar (std3) biasanya mengandung “Ketik Hi…”
-      if (isClosingHydro(text)) {
-        if (!hiLoopEnabled) log('▶️ Closing Hydro → Hi loop dilanjutkan.')
-        hiLoopEnabled = true
+      return
+    }
+
+    // === Semua selain 3 standar = TRIGGER → forward ke OWNER ===
+    try {
+      const label = (from === SOURCE_JID) ? 'SOURCE' : (from === TARGET_JID) ? 'TARGET' : from
+      await sock.sendMessage(OWNER_JID, { text: `📣 [TRIGGER dari ${label}]\n${text}` })
+      log('➡️ Trigger diforward ke owner.')
+    } catch (e) {
+      log('⚠️ Gagal forward trigger ke owner:', e?.message || e)
+    }
+    saveLastTrigger(text)
+
+    // ====== AUTO-FLOW Tetap Jalan (opsional sesuai kebutuhan sebelumnya) ======
+    // Promo intro → jangan balas apapun
+    if (isPromoIntro(text)) {
+      log('ℹ️ Promo intro terdeteksi → tidak balas.')
+      return
+    }
+
+    // Selesai → naik tahap jika masih tahap-1 (baik SOURCE maupun TARGET)
+    if (isDoneFlow(text)) {
+      const jid = from
+      const st = getStage(jid)
+      if (st === 1) {
+        log(`🎉 Bot telah Sukses (${jid}) — tahap-1 selesai, lanjut ke tahap-2.`)
+        setStage(jid, 2)
+      } else {
+        log(`🎉 Bot telah Sukses (${jid}) — tahap-2.`)
+      }
+      // tidak perlu balas apa-apa (kecuali kamu ingin react/checklist)
+      return
+    }
+
+    // Foto kode unik → IMG1
+    if (isAskImgCode(text)) {
+      try {
+        await sendImage(sock, from, IMG1_PATH)
+        log(`📤 [${from}] Kirim gambar1 (bukti foto kode unik).`)
+      } catch (e) {
+        log(`⚠️ [${from}] Gagal kirim gambar1:`, e?.message || e)
       }
       return
     }
 
-    /* ===== OWNER: perintah reset tahap (opsional) ===== */
-    if (from === OWNER_JID) {
-      const t = norm(text)
-      if (t === 'reset tahap source') { setStage(SOURCE_JID, 1); return }
-      if (t === 'reset tahap target') { setStage(TARGET_JID, 1); return }
-    }
-
-    /* ===== SOURCE_JID ===== */
-    if (from === SOURCE_JID) {
-      // Kontrol hi-loop
-      if (isHydroFlow(text)) {
-        if (hiLoopEnabled) log('⏸️ Hi loop dihentikan (SOURCE Hydro flow).')
-        hiLoopEnabled = false
-      }
-      if (isClosingHydro(text)) {
-        if (!hiLoopEnabled) log('▶️ Closing Hydro (SOURCE) → Hi loop lanjut.')
-        hiLoopEnabled = true
-      }
-
-      // Notifikasi Telegram HANYA untuk trigger (promo intro atau minta kode)
-      if (isSourceTrigger(text)) {
-        try {
-          await tgSendMessage(`📣 *TRIGGER dari SOURCE*\n\n${text}`)
-          log('➡️ Trigger dikirim ke Telegram.')
-        } catch {}
-      }
-
-      // Promo intro → JANGAN balas apapun
-      if (isPromoIntro(text)) {
-        log('ℹ️ [SOURCE] Promo intro terdeteksi → tidak balas.')
-        return
-      }
-
-      // Selesai → naik tahap jika masih tahap-1
-      if (isDoneFlow(text)) {
-        const st = getStage(SOURCE_JID)
-        if (st === 1) {
-          log('🎉 Bot telah Sukses (SOURCE) — tahap-1 selesai, lanjut ke tahap-2.')
-          setStage(SOURCE_JID, 2)
-        } else {
-          log('🎉 Bot telah Sukses (SOURCE) — tahap-2.')
-        }
-        return
-      }
-
-      // Foto kode unik → IMG1
-      if (isAskImgCode(text)) {
-        try {
-          await sendImage(sock, SOURCE_JID, IMG1_PATH)
-          log('📤 [SOURCE] Kirim gambar1 (bukti foto kode unik).')
-        } catch (e) {
-          log('⚠️ [SOURCE] Gagal kirim gambar1:', e?.message || e)
-        }
-        return
-      }
-
-      // Foto KTP → IMG2
-      if (isAskKTP(text)) {
-        try {
-          await sendImage(sock, SOURCE_JID, IMG2_PATH)
-          log('📤 [SOURCE] Kirim gambar2 (foto KTP).')
-        } catch (e) {
-          log('⚠️ [SOURCE] Gagal kirim gambar2:', e?.message || e)
-        }
-        return
-      }
-
-      // Minta kode unik → kirim sesuai tahap; skip bila ada notice 'valid'
-      if (isAskCode(text)) {
-        if (isCodeValidNotice(text)) {
-          log('ℹ️ [SOURCE] "kode unik valid" → skip kirim kode.')
-          return
-        }
-        const code = getActiveCodeFor(SOURCE_JID)
-        try {
-          await sock.sendMessage(SOURCE_JID, { text: code })
-          log(`📤 [SOURCE] Kirim kode tahap-${getStage(SOURCE_JID)}.`)
-        } catch (e) {
-          log('⚠️ [SOURCE] Gagal kirim kode:', e?.message || e)
-        }
-        return
-      }
-
-      // Lainnya: catat sebagai last trigger (opsional)
-      saveLastTrigger(text)
-      return
-    }
-
-    /* ===== TARGET_JID ===== */
-    if (from === TARGET_JID) {
-      // Kontrol hi-loop
-      if (isHydroFlow(text)) {
-        if (hiLoopEnabled) log('⏸️ Hi loop dihentikan (TARGET Hydro flow).')
-        hiLoopEnabled = false
-      }
-      if (isClosingHydro(text)) {
-        if (!hiLoopEnabled) log('▶️ Closing Hydro (TARGET) → Hi loop lanjut.')
-        hiLoopEnabled = true
-      }
-
-      // Promo intro di TARGET → jangan balas
-      if (isPromoIntro(text)) {
-        log('ℹ️ [TARGET] Promo intro terdeteksi → tidak balas.')
-        return
-      }
-
-      // Selesai → naik tahap bila masih tahap-1
-      if (isDoneFlow(text)) {
-        try { await sock.sendMessage(TARGET_JID, { react: { text: '✅', key: msg.key } }) } catch {}
-        const st = getStage(TARGET_JID)
-        if (st === 1) {
-          log('🎉 Bot telah Sukses (TARGET) — tahap-1 selesai, lanjut ke tahap-2.')
-          setStage(TARGET_JID, 2)
-        } else {
-          log('🎉 Bot telah Sukses (TARGET) — tahap-2.')
-        }
-        return
-      }
-
-      // Foto kode unik → IMG1
-      if (isAskImgCode(text)) {
-        try {
-          await sendImage(sock, TARGET_JID, IMG1_PATH)
-          log('📤 Kirim gambar1 (bukti foto kode unik).')
-        } catch (e) {
-          log('⚠️ Gagal kirim gambar1:', e?.message || e)
-        }
-        return
-      }
-
-      // Foto KTP → IMG2
-      if (isAskKTP(text)) {
-        try {
-          await sendImage(sock, TARGET_JID, IMG2_PATH)
-          log('📤 Kirim gambar2 (foto KTP).')
-        } catch (e) {
-          log('⚠️ Gagal kirim gambar2:', e?.message || e)
-        }
-        return
-      }
-
-      // Minta kode unik → kirim sesuai tahap; skip bila ada notice 'valid'
-      if (isAskCode(text)) {
-        if (isCodeValidNotice(text)) {
-          log('ℹ️ [TARGET] "kode unik valid" → skip kirim kode.')
-          return
-        }
-        const code = getActiveCodeFor(TARGET_JID)
-        try {
-          await sock.sendMessage(TARGET_JID, { text: code })
-          log(`📤 [TARGET] Kirim kode tahap-${getStage(TARGET_JID)}.`)
-        } catch (e) {
-          log('⚠️ [TARGET] Gagal kirim kode:', e?.message || e)
-        }
-        return
+    // Foto KTP → IMG2
+    if (isAskKTP(text)) {
+      try {
+        await sendImage(sock, from, IMG2_PATH)
+        log(`📤 [${from}] Kirim gambar2 (foto KTP).`)
+      } catch (e) {
+        log(`⚠️ [${from}] Gagal kirim gambar2:`, e?.message || e)
       }
       return
     }
+
+    // Minta kode unik → kirim sesuai tahap; skip bila notice 'valid'
+    if (isAskCode(text)) {
+      if (isCodeValidNotice(text)) {
+        log(`ℹ️ [${from}] "kode unik valid" → skip kirim kode.`)
+        return
+      }
+      const code = getActiveCodeFor(from)
+      try {
+        await sock.sendMessage(from, { text: code })
+        log(`📤 [${from}] Kirim kode tahap-${getStage(from)}.`)
+      } catch (e) {
+        log(`⚠️ [${from}] Gagal kirim kode:`, e?.message || e)
+      }
+      return
+    }
+
+    // Jika tidak cocok auto-flow apapun → cukup sudah (trigger sudah diforward)
   })
 }
 
