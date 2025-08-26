@@ -27,6 +27,7 @@ const IMG2_PATH = process.env.IMG2_PATH || ''
 
 // Hi loop
 const HI_INTERVAL_MS = Number(process.env.HI_INTERVAL_MS || 60 * 1000) // ritme "Hi"
+const HI_LOOP_DEFAULT = String(process.env.HI_LOOP_DEFAULT || 'off').toLowerCase() === 'on'
 
 /* ================== STORAGE ================== */
 const DATA_DIR = path.resolve('./data')
@@ -155,7 +156,7 @@ function getActiveCodeFor(jid) {
 
 /* ================== HI LOOP ================== */
 // Sesuai kebutuhan: Hi loop HANYA ON kalau std3 masuk. Selain itu OFF.
-let hiLoopEnabled = false // start OFF
+let hiLoopEnabled = HI_LOOP_DEFAULT
 let lastHiAt = 0
 async function hiLoop(sock) {
   log('▶️ Hi loop dimulai')
