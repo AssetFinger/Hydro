@@ -158,6 +158,7 @@ function hiShouldRunNow() {
 async function hiLoop(sock) {
   log('▶️ Hi loop dimulai')
   log(`ℹ️ Hi manual: ${hiManualEnabled ? 'ON' : 'OFF'} | Stop jika idle SOURCE ≥ ${Math.round(HI_QUIET_MS/60000)} menit`)
+  lastHiAt = Date.now() - HI_INTERVAL_MS
   while (sock?.user) {
     try {
       if (hiShouldRunNow() && Date.now() - lastHiAt > HI_INTERVAL_MS) {
