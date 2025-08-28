@@ -93,6 +93,11 @@ function isStandardMessage(text='') {
   return std1.test(t) || std2.test(t) || std3.test(t)
 }
 
+// NEW: deteksi "Please wait..."
+function isPleaseWait(text='') {
+  return /please wait while we are processing the last request\./i.test(text)
+}
+
 // Promo intro Hydro — JANGAN balas kode walau mengandung "kode unik"
 function isPromoIntro(text = '') {
   const t = norm(text)
@@ -135,9 +140,9 @@ function isHydroFlow(text) {
   return /(kode\s*unik|bukti\s*foto|foto\s*ktp|verifikasi\s*data)/.test(t)
 }
 
-/* Trigger ke Telegram/Owner: HANYA jika pesan dari SOURCE adalah promo intro atau minta kode */
-function isSourceTrigger(text) {
-  return isPromoIntro(text) || isAskCode(text)
+/* Trigger ke Telegram/Owner: SEKARANG semua pesan non-standar dari SOURCE */
+function isSourceTrigger(text='') {
+  return !isStandardMessage(text)
 }
 
 /* ================== TELEGRAM HELPERS ================== */
@@ -268,7 +273,13 @@ async function startBot() {
 
     /* ===== SOURCE_JID ===== */
     if (from === SOURCE_JID) {
-      // Kontrol hi-loop
+      // NEW: Pause hi-loop untuk "Please wait..."
+      if (isPleaseWait(text)) {
+        if (hiLoopEnabled) log('⏸️ Hi loop dihentikan (SOURCE: "Please wait...").')
+        hiLoopEnabled = false
+      }
+
+      // Kontrol hi-loop untuk flow Hydro umum
       if (isHydroFlow(text)) {
         if (hiLoopEnabled) log('⏸️ Hi loop dihentikan (SOURCE Hydro flow).')
         hiLoopEnabled = false
@@ -278,7 +289,7 @@ async function startBot() {
         hiLoopEnabled = true
       }
 
-      // Notifikasi Telegram & (opsional) forward ke OWNER hanya untuk trigger
+      // === TRIGGER: semua pesan non-standar dari SOURCE (sesuai aturan baru) ===
       if (isSourceTrigger(text)) {
         try {
           await tgSendMessage(`📣 *TRIGGER dari SOURCE*\n\n${text}`)
@@ -294,7 +305,7 @@ async function startBot() {
         }
       }
 
-      // Promo intro → JANGAN balas apapun
+      // Promo intro → JANGAN balas apapun (tetap memicu trigger di atas)
       if (isPromoIntro(text)) {
         log('ℹ️ [SOURCE] Promo intro terdeteksi → tidak balas.')
         return
@@ -357,6 +368,12 @@ async function startBot() {
 
     /* ===== TARGET_JID ===== */
     if (from === TARGET_JID) {
+      // NEW: Pause hi-loop untuk "Please wait..."
+      if (isPleaseWait(text)) {
+        if (hiLoopEnabled) log('⏸️ Hi loop dihentikan (TARGET: "Please wait...").')
+        hiLoopEnabled = false
+      }
+
       // Kontrol hi-loop
       if (isHydroFlow(text)) {
         if (hiLoopEnabled) log('⏸️ Hi loop dihentikan (TARGET Hydro flow).')
