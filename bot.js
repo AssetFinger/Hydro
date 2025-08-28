@@ -4,7 +4,7 @@ const path = require('path')
 const qrcode = require('qrcode-terminal')
 const axios = require('axios')
 const FormData = require('form-data')
-const googleTTS = require('google-tts-api')
+const googleTTS = require('google-tts-api') // (tidak dipakai di versi ini, aman dibiarkan)
 const { exec, execFile } = require('child_process')
 const dotenv = require('dotenv')
 const mime = require('mime-types')
@@ -25,10 +25,11 @@ let INIT_CODE2 = process.env.INIT_CODE2 || ''   // bisa diubah via owner command
 const IMG1_PATH = process.env.IMG1_PATH || ''
 const IMG2_PATH = process.env.IMG2_PATH || ''
 
-// Hi loop (ritme & jendela AKTIF setelah SOURCE balas)
-const HI_INTERVAL_MS       = Number(process.env.HI_INTERVAL_MS       || 60 * 1000)       // kirim "Hi" tiap 1 menit
-const HI_ACTIVE_WINDOW_MS  = Number(process.env.HI_ACTIVE_WINDOW_MS  || 5 * 60 * 1000)   // Hi AKTIF selama 5 menit setelah SOURCE terakhir balas
-const HI_LOOP_DEFAULT      = String(process.env.HI_LOOP_DEFAULT || 'on').toLowerCase() === 'on' // default ON
+// Hi loop (ritme & jendela sunyi)
+const HI_INTERVAL_MS   = Number(process.env.HI_INTERVAL_MS   || 60 * 1000)       // kirim "Hi" tiap 1 menit
+const HI_QUIET_MS      = Number(process.env.HI_QUIET_MS      || 5 * 60 * 1000)   // Hi aktif bila sunyi SOURCE ≥ 5 menit
+const HI_LOOP_DEFAULT  = String(process.env.HI_LOOP_DEFAULT || 'on').toLowerCase() === 'on' // default ON
+const HI_BOOT_KICK     = String(process.env.HI_BOOT_KICK || 'off').toLowerCase() === 'on'   // buka jendela Hi saat boot
 
 /* ================== STORAGE ================== */
 const DATA_DIR = path.resolve('./data')
@@ -155,23 +156,22 @@ function getActiveCodeFor(jid) {
   return stage === 2 ? (INIT_CODE2 || INIT_CODE) : INIT_CODE
 }
 
-/* ================== HI LOOP (Active Window sejak SOURCE balas) ================== */
+/* ================== HI LOOP (berbasis sunyi dari SOURCE) ================== */
 let hiManualEnabled = HI_LOOP_DEFAULT        // Owner: "hi on"/"hi off"
 let lastHiAt        = 0                      // ritme pengiriman Hi
-let lastSourceAt    = 0                      // timestamp pesan terakhir dari SOURCE (0 = belum ada)
+let lastSourceAt    = Date.now()             // timestamp aktivitas terakhir dari SOURCE
 
-function hiActiveWindowOpen() {
-  // Hi AKTIF bila kita masih berada dalam X menit SETELAH pesan terakhir dari SOURCE
-  return lastSourceAt > 0 && (Date.now() - lastSourceAt) <= HI_ACTIVE_WINDOW_MS
+function hiAutoWindowOpen() {
+  return (Date.now() - lastSourceAt) >= HI_QUIET_MS
 }
 function hiIsEnabledNow() {
-  // Manual harus ON, dan masih dalam jendela aktif
-  return hiManualEnabled && hiActiveWindowOpen()
+  // Wajib: manual toggle ON **dan** sunyi SOURCE ≥ HI_QUIET_MS
+  return hiManualEnabled && hiAutoWindowOpen()
 }
 
 async function hiLoop(sock) {
   log('▶️ Hi loop dimulai')
-  log(`ℹ️ Hi manual: ${hiManualEnabled ? 'ON' : 'OFF'} | Active window: ${Math.round(HI_ACTIVE_WINDOW_MS/60000)} menit setelah SOURCE balas`)
+  log(`ℹ️ Hi manual: ${hiManualEnabled ? 'ON' : 'OFF'} | Auto quiet window: ${Math.round(HI_QUIET_MS/60000)} menit`)
   while (sock?.user) {
     try {
       if (hiIsEnabledNow() && Date.now() - lastHiAt > HI_INTERVAL_MS) {
@@ -187,7 +187,7 @@ async function hiLoop(sock) {
 }
 
 /* ================== OWNER CONTROL ================== */
-// Owner dapat pause/resume bot, set code1/code2, dan hi on/off
+// Owner dapat pause/resume bot, set code1/code2, hi on/off, dan hi now
 let PAUSED = false
 function pausedGuard(from) {
   return PAUSED && from !== OWNER_JID
@@ -231,7 +231,7 @@ async function handleOwnerCommands(sock, text) {
   }
   if (t === 'hi on') {
     hiManualEnabled = true
-    await sock.sendMessage(OWNER_JID, { text: `✅ Hi-loop: ON (aktif SELAMA ${Math.round(HI_ACTIVE_WINDOW_MS/60000)} menit SETELAH SOURCE balas)` })
+    await sock.sendMessage(OWNER_JID, { text: `✅ Hi-loop: ON (aktif bila sunyi SOURCE ≥ ${Math.round(HI_QUIET_MS/60000)} menit)` })
     return true
   }
   if (t === 'hi off') {
@@ -239,13 +239,20 @@ async function handleOwnerCommands(sock, text) {
     await sock.sendMessage(OWNER_JID, { text: '⏸️ Hi-loop: OFF' })
     return true
   }
+  if (t === 'hi now') {
+    // buka jendela aktif sekarang juga
+    lastSourceAt = Date.now()
+    await sock.sendMessage(OWNER_JID, { text: `🚀 Hi window dibuka sekarang (aktif ${Math.round(HI_QUIET_MS/60000)} menit).` })
+    log('HI window forced by owner (hi now).')
+    return true
+  }
   if (t === 'status bot') {
-    const sinceMin = lastSourceAt ? ((Date.now() - lastSourceAt)/60000).toFixed(1) : '–'
+    const idleMin = ((Date.now() - lastSourceAt)/60000).toFixed(1)
     const lines = [
       `🧠 Status Bot:`,
       `• Paused: ${PAUSED}`,
       `• Hi Manual: ${hiManualEnabled ? 'ON' : 'OFF'}`,
-      `• Active Window: ${Math.round(HI_ACTIVE_WINDOW_MS/60000)} menit (sejak SOURCE balas: ${sinceMin} m)`,
+      `• Auto Quiet Window: ${Math.round(HI_QUIET_MS/60000)} menit (idle SOURCE: ${idleMin} m)`,
       `• Stage SOURCE: ${getStage(SOURCE_JID)}`,
       `• Stage TARGET: ${getStage(TARGET_JID)}`,
       `• INIT_CODE: ${INIT_CODE}`,
@@ -287,6 +294,13 @@ async function startBot() {
     if (connection === 'open') {
       reconnectAttempts = 0
       log('✅ Bot tersambung sebagai:', sock.user?.id)
+
+      // Kick start jendela Hi saat boot bila diaktifkan
+      if (HI_BOOT_KICK) {
+        lastSourceAt = Date.now()
+        log('🚀 HI_BOOT_KICK aktif → Hi window dibuka saat boot.')
+      }
+
       hiLoop(sock).catch(e => log('hiLoop error:', e))
     } else if (connection === 'close') {
       const statusCode = (lastDisconnect?.error instanceof Boom)
@@ -315,9 +329,9 @@ async function startBot() {
       lastSourceAt = Date.now()
       if (prev && lastSourceAt - prev > 1000) {
         const gap = ((lastSourceAt - prev)/1000).toFixed(1)
-        log(`⏱️ Source activity detected (gap ${gap}s) → reset active window.`)
+        log(`⏱️ Source activity detected (gap ${gap}s) → reset idle timer.`)
       } else {
-        log(`⏱️ Source activity detected → reset active window.`)
+        log(`⏱️ Source activity detected → reset idle timer.`)
       }
     }
 
@@ -335,7 +349,7 @@ async function startBot() {
     // ===== Abaikan 3 pesan standar (bukan trigger, tidak balas apa pun) =====
     if (text && isStandardMessage(text)) {
       log('ℹ️ Pesan standar terdeteksi → diabaikan.')
-      // (Tidak perlu toggle Hi-loop; kini berbasis jendela aktif setelah SOURCE balas)
+      // (Tidak perlu toggle Hi-loop; kini berbasis waktu sunyi)
       return
     }
 
