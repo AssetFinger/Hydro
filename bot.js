@@ -25,9 +25,10 @@ let INIT_CODE2 = process.env.INIT_CODE2 || ''   // bisa diubah via owner command
 const IMG1_PATH = process.env.IMG1_PATH || ''
 const IMG2_PATH = process.env.IMG2_PATH || ''
 
-// Hi loop
-const HI_INTERVAL_MS = Number(process.env.HI_INTERVAL_MS || 60 * 1000) // ritme "Hi"
-const HI_LOOP_DEFAULT = String(process.env.HI_LOOP_DEFAULT || 'off').toLowerCase() === 'on'
+// Hi loop (ritme & jendela sunyi)
+const HI_INTERVAL_MS   = Number(process.env.HI_INTERVAL_MS   || 60 * 1000)       // kirim "Hi" tiap 1 menit
+const HI_QUIET_MS      = Number(process.env.HI_QUIET_MS      || 5 * 60 * 1000)   // Hi aktif bila sunyi SOURCE ≥ 5 menit
+const HI_LOOP_DEFAULT  = String(process.env.HI_LOOP_DEFAULT || 'on').toLowerCase() === 'on' // default ON
 
 /* ================== STORAGE ================== */
 const DATA_DIR = path.resolve('./data')
@@ -154,31 +155,40 @@ function getActiveCodeFor(jid) {
   return stage === 2 ? (INIT_CODE2 || INIT_CODE) : INIT_CODE
 }
 
-/* ================== HI LOOP ================== */
-// Sesuai kebutuhan: Hi loop HANYA ON kalau std3 masuk. Selain itu OFF.
-let hiLoopEnabled = HI_LOOP_DEFAULT
-let lastHiAt = 0
+/* ================== HI LOOP (berbasis sunyi dari SOURCE) ================== */
+let hiManualEnabled = HI_LOOP_DEFAULT        // Owner: "hi on"/"hi off"
+let lastHiAt        = 0                      // ritme pengiriman Hi
+let lastSourceAt    = Date.now()             // timestamp pesan terakhir dari SOURCE
+
+function hiAutoWindowOpen() {
+  return (Date.now() - lastSourceAt) >= HI_QUIET_MS
+}
+function hiIsEnabledNow() {
+  // Wajib: manual toggle ON **dan** sunyi SOURCE ≥ HI_QUIET_MS
+  return hiManualEnabled && hiAutoWindowOpen()
+}
+
 async function hiLoop(sock) {
   log('▶️ Hi loop dimulai')
+  log(`ℹ️ Hi manual: ${hiManualEnabled ? 'ON' : 'OFF'} | Auto quiet window: ${Math.round(HI_QUIET_MS/60000)} menit`)
   while (sock?.user) {
-    if (hiLoopEnabled && Date.now() - lastHiAt > HI_INTERVAL_MS) {
-      try {
+    try {
+      if (hiIsEnabledNow() && Date.now() - lastHiAt > HI_INTERVAL_MS) {
         await sock.sendMessage(TARGET_JID, { text: 'Hi' })
         lastHiAt = Date.now()
         log(`✅ Hi terkirim ke ${WA_TARGET}`)
-      } catch (e) {
-        log('❌ Gagal kirim Hi:', e.message)
       }
+    } catch (e) {
+      log('❌ Gagal kirim Hi:', e.message)
     }
     await delay(5000)
   }
 }
 
 /* ================== OWNER CONTROL ================== */
-// Owner dapat pause/resume bot & set code
+// Owner dapat pause/resume bot, set code1/code2, dan hi on/off
 let PAUSED = false
 function pausedGuard(from) {
-  // jika bot dipause, hanya pesan OWNER yang dilayani
   return PAUSED && from !== OWNER_JID
 }
 async function handleOwnerCommands(sock, text) {
@@ -197,7 +207,7 @@ async function handleOwnerCommands(sock, text) {
     return true
   }
   if (t.startsWith('set code1 ')) {
-    const code = text.slice(9).trim() // setelah 'set code1 '
+    const code = text.slice(9).trim()
     if (code) {
       INIT_CODE = code
       await sock.sendMessage(OWNER_JID, { text: `✅ INIT_CODE diperbarui: ${INIT_CODE}` })
@@ -208,7 +218,7 @@ async function handleOwnerCommands(sock, text) {
     return true
   }
   if (t.startsWith('set code2 ')) {
-    const code = text.slice(9).trim() // setelah 'set code2 '
+    const code = text.slice(9).trim()
     if (code) {
       INIT_CODE2 = code
       await sock.sendMessage(OWNER_JID, { text: `✅ INIT_CODE2 diperbarui: ${INIT_CODE2}` })
@@ -218,11 +228,23 @@ async function handleOwnerCommands(sock, text) {
     }
     return true
   }
+  if (t === 'hi on') {
+    hiManualEnabled = true
+    await sock.sendMessage(OWNER_JID, { text: `✅ Hi-loop: ON (akan aktif saat sunyi SOURCE ≥ ${Math.round(HI_QUIET_MS/60000)} menit)` })
+    return true
+  }
+  if (t === 'hi off') {
+    hiManualEnabled = false
+    await sock.sendMessage(OWNER_JID, { text: '⏸️ Hi-loop: OFF' })
+    return true
+  }
   if (t === 'status bot') {
+    const idleMin = ((Date.now() - lastSourceAt)/60000).toFixed(1)
     const lines = [
       `🧠 Status Bot:`,
       `• Paused: ${PAUSED}`,
-      `• Hi Loop: ${hiLoopEnabled ? 'ON' : 'OFF'} (aktif kalau std3 masuk)`,
+      `• Hi Manual: ${hiManualEnabled ? 'ON' : 'OFF'}`,
+      `• Auto Quiet Window: ${Math.round(HI_QUIET_MS/60000)} menit (idle SOURCE: ${idleMin} m)`,
       `• Stage SOURCE: ${getStage(SOURCE_JID)}`,
       `• Stage TARGET: ${getStage(TARGET_JID)}`,
       `• INIT_CODE: ${INIT_CODE}`,
@@ -285,62 +307,67 @@ async function startBot() {
     if (!msg?.message) return
 
     const from = msg.key.remoteJid
-    const text = extractTextFromMessage(msg).trim()
-    if (!text) return
 
-    // =============== OWNER COMMANDS ===============
-    if (from === OWNER_JID) {
+    // === Penting: update lastSourceAt seketika, WALAU tidak ada teks ===
+    if (from === SOURCE_JID) {
+      const prev = lastSourceAt
+      lastSourceAt = Date.now()
+      if (prev && lastSourceAt - prev > 1000) {
+        const gap = ((lastSourceAt - prev)/1000).toFixed(1)
+        log(`⏱️ Source activity detected (gap ${gap}s) → reset idle timer.`)
+      } else {
+        log(`⏱️ Source activity detected → reset idle timer.`)
+      }
+    }
+
+    const text = extractTextFromMessage(msg).trim()
+
+    // ===== OWNER COMMANDS =====
+    if (from === OWNER_JID && text) {
       const handled = await handleOwnerCommands(sock, text)
       if (handled) return
-      // lanjutkan ke bawah kalau owner kirim pesan biasa (tidak ada perintah) → tetap kena aturan trigger
     }
 
     // Jika bot dijeda & pengirim bukan owner → abaikan total
     if (pausedGuard(from)) return
 
-    // === Aturan Hi-loop: hanya ON jika std3; selain itu OFF ===
-    if (isClosingHydro(text)) {
-      if (!hiLoopEnabled) log('▶️ std3 diterima → Hi loop ON')
-      hiLoopEnabled = true
-    } else {
-      if (hiLoopEnabled) log('⏸️ Bukan std3 → Hi loop OFF')
-      hiLoopEnabled = false
-    }
-
-    // === Abaikan 3 pesan standar (bukan trigger, tidak balas apa pun) ===
-    if (isStandardMessage(text)) {
+    // ===== Abaikan 3 pesan standar (bukan trigger, tidak balas apa pun) =====
+    if (text && isStandardMessage(text)) {
       log('ℹ️ Pesan standar terdeteksi → diabaikan.')
+      // (Tidak perlu toggle Hi-loop; kini berbasis waktu sunyi)
       return
     }
 
-    // === Semua selain 3 standar = TRIGGER → forward ke OWNER ===
-    try {
-      const label = (from === SOURCE_JID) ? 'SOURCE' : (from === TARGET_JID) ? 'TARGET' : from
-      await sock.sendMessage(OWNER_JID, { text: `📣 [TRIGGER dari ${label}]\n${text}` })
-      log('➡️ Trigger diforward ke owner.')
-    } catch (e) {
-      log('⚠️ Gagal forward trigger ke owner:', e?.message || e)
+    // ===== Semua selain 3 standar = TRIGGER → forward ke OWNER (kalau ada teks) =====
+    if (text && isTrigger(text)) {
+      try {
+        const label = (from === SOURCE_JID) ? 'SOURCE' : (from === TARGET_JID) ? 'TARGET' : from
+        await sock.sendMessage(OWNER_JID, { text: `📣 [TRIGGER dari ${label}]\n${text}` })
+        log('➡️ Trigger (teks) diforward ke owner.')
+      } catch (e) {
+        log('⚠️ Gagal forward trigger ke owner:', e?.message || e)
+      }
+      saveLastTrigger(text)
     }
-    saveLastTrigger(text)
 
-    // ====== AUTO-FLOW Tetap Jalan (opsional sesuai kebutuhan sebelumnya) ======
+    // ====== AUTO-FLOW (opsional) hanya kalau ada teks ======
+    if (!text) return
+
     // Promo intro → jangan balas apapun
     if (isPromoIntro(text)) {
       log('ℹ️ Promo intro terdeteksi → tidak balas.')
       return
     }
 
-    // Selesai → naik tahap jika masih tahap-1 (baik SOURCE maupun TARGET)
+    // Selesai → naik tahap jika masih tahap-1
     if (isDoneFlow(text)) {
-      const jid = from
-      const st = getStage(jid)
+      const st = getStage(from)
       if (st === 1) {
-        log(`🎉 Bot telah Sukses (${jid}) — tahap-1 selesai, lanjut ke tahap-2.`)
-        setStage(jid, 2)
+        log(`🎉 Bot telah Sukses (${from}) — tahap-1 selesai, lanjut ke tahap-2.`)
+        setStage(from, 2)
       } else {
-        log(`🎉 Bot telah Sukses (${jid}) — tahap-2.`)
+        log(`🎉 Bot telah Sukses (${from}) — tahap-2.`)
       }
-      // tidak perlu balas apa-apa (kecuali kamu ingin react/checklist)
       return
     }
 
@@ -382,7 +409,7 @@ async function startBot() {
       return
     }
 
-    // Jika tidak cocok auto-flow apapun → cukup sudah (trigger sudah diforward)
+    // Jika tidak cocok auto-flow apapun → cukup sudah (trigger sudah diforward jika ada teks)
   })
 }
 
